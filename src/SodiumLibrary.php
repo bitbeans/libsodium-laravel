@@ -203,13 +203,19 @@ class SodiumLibrary
      */
     public static function encrypt($message, $key)
     {
-        // Generate entropy to encrypt the data
+        // Create a special hashed key for encryption.
+        $key = self::rawHash($key, null, Sodium\CRYPTO_SECRETBOX_KEYBYTES);
+        // Generate a nonce for the communication.
         $nonce = self::entropy();
-
-        // Encrypt the message
-        $messageEncrypted = Sodium\crypto_secretbox($message, $nonce, self::rawHash($key, null, Sodium\CRYPTO_SECRETBOX_KEYBYTES));
-
-        return sprintf('%s.%s', self::bin2hex($nonce), self::bin2hex($messageEncrypted));
+        // Serialize and encrypt the message object
+        $ciphertext = \Sodium\crypto_secretbox(serialize($message), $nonce, $key);
+        $nonce = base64_encode($nonce);
+        $ciphertext = base64_encode($ciphertext);
+        $json = json_encode(compact('nonce', 'ciphertext'));
+        if (! is_string($json)) {
+            throw new Exceptions\EncryptionException('Failed to encrypt message using key');
+        }
+        return base64_encode($json);
     }
 
     /**
@@ -222,19 +228,46 @@ class SodiumLibrary
      */
     public static function decrypt($message, $key)
     {
-        $payload = explode('.', $message);
-
-        $decryption = Sodium\crypto_secretbox_open(
-            Sodium\hex2bin($payload[1]),
-            Sodium\hex2bin($payload[0]),
-            self::rawHash($key, null, Sodium\CRYPTO_SECRETBOX_KEYBYTES)
-        );
-
-        if (!$decryption) {
-            throw new DecryptionException('The key provided cannot decrypt the message');
+        // Create a special hashed key for encryption.
+        $key = self::rawHash($key, null, Sodium\CRYPTO_SECRETBOX_KEYBYTES);
+        // Validate and decode the paylload.
+        $payload = self::getJsonPayload($message);
+        $nonce = base64_decode($payload['nonce']);
+        $ciphertext = base64_decode($payload['ciphertext']);
+        // Open the secret box using the data provided.
+        $plaintext = \Sodium\crypto_secretbox_open($ciphertext, $nonce, $key);
+        // Test if the secret box returned usable data.
+        if ($plaintext === false) {
+            throw new Exceptions\DecryptionException("Failed to decrypt message using key.");
         }
+        return unserialize($plaintext);
+    }
 
-        return $decryption;
+    /**
+     * Get the JSON array from the given payload.
+     *
+     * @param  string  $payload
+     * @return array
+     *
+     * @throws Exceptions\DecryptException
+     */
+    private static function getJsonPayload($payload)
+    {
+        $payload = json_decode(base64_decode($payload), true);
+        if (! $payload || self::isInvalidPayload($payload)) {
+            throw new Exceptions\DecryptionException('The payload is invalid.');
+        }
+        return $payload;
+    }
+    /**
+     * Verify that the encryption payload is valid.
+     *
+     * @param  array|mixed  $data
+     * @return bool
+     */
+    private static function isInvalidPayload($data)
+    {
+        return ! is_array($data) || ! isset($data['nonce']) || ! isset($data['ciphertext']);
     }
 
     /**
